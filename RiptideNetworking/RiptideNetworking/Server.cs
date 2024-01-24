@@ -23,6 +23,10 @@ namespace Riptide
         public event EventHandler<MessageReceivedEventArgs> MessageReceived;
         /// <summary>Invoked when a client disconnects.</summary>
         public event EventHandler<ServerDisconnectedEventArgs> ClientDisconnected;
+        /// <summary>Invoked when a client joins a room.</summary>
+        public event EventHandler<ServerRoomJoinedEventArgs> RoomJoined;
+        /// <summary>Invoked when a client leaves a room.</summary>
+        public event EventHandler<ServerRoomLeftEventArgs> RoomLeft;
 
         /// <summary>Whether or not the server is currently running.</summary>
         public bool IsRunning { get; private set; }
@@ -45,6 +49,8 @@ namespace Riptide
         /// <summary>An array of all the currently connected clients.</summary>
         /// <remarks>The position of each <see cref="Connection"/> instance in the array does <i>not</i> correspond to that client's numeric ID (except by coincidence).</remarks>
         public Connection[] Clients => clients.Values.ToArray();
+        /// <summary>The opened rooms and their inhabitants.</summary>
+        public Dictionary<string, List<Connection>> Rooms { get; }
         /// <summary>Encapsulates a method that handles a message from a client.</summary>
         /// <param name="fromClientId">The numeric ID of the client from whom the message was received.</param>
         /// <param name="message">The message that was received.</param>
@@ -71,6 +77,8 @@ namespace Riptide
         private IServer transport;
         /// <summary>All currently unused client IDs.</summary>
         private Queue<ushort> availableClientIds;
+        /// <summary>A dictionary of all the rooms a client is in.</summary>
+        private Dictionary<Connection, List<string>> clientToRooms;
 
         /// <summary>Handles initial setup.</summary>
         /// <param name="transport">The transport to use for sending and receiving data.</param>
@@ -81,6 +89,8 @@ namespace Riptide
             pendingConnections = new List<Connection>();
             clients = new Dictionary<ushort, Connection>();
             timedOutClients = new List<Connection>();
+            clientToRooms = new Dictionary<Connection, List<string>>();
+            Rooms = new Dictionary<string, List<Connection>>();
         }
         /// <summary>Handles initial setup using the built-in UDP transport.</summary>
         /// <param name="logName">The name to use when logging messages via <see cref="RiptideLogger"/>.</param>
@@ -386,6 +396,113 @@ namespace Riptide
             if (shouldRelease)
                 message.Release();
         }
+        
+        /// <summary>Sends a message to all clients in the room of the given ID.</summary>
+        /// <param name="message">The message to send.</param>
+        /// <param name="roomId">The ID of the room to send the message to.</param>
+        /// <param name="shouldRelease">Whether or not to return the message to the pool after it is sent.</param>
+        /// <inheritdoc cref="Connection.Send(Message, bool)"/>
+        public void SendToRoom(Message message, string roomId, bool shouldRelease = true)
+        {
+            if (Rooms.TryGetValue(roomId, out List<Connection> room))
+            {
+                foreach (Connection client in room)
+                    client.Send(message, false);
+
+                if (shouldRelease)
+                    message.Release();
+            }
+        }
+        
+        /// <summary>Sends a message to all clients in the room of the given ID.</summary>
+        /// <param name="message">The message to send.</param>
+        /// <param name="roomId">The ID of the room to send the message to.</param>
+        /// <param name="exceptToClientId">The numeric ID of the client to <i>not</i> send the message to.</param>
+        /// <param name="shouldRelease">Whether or not to return the message to the pool after it is sent.</param>
+        /// <inheritdoc cref="Connection.Send(Message, bool)"/>
+        public void SendToRoomExcept(Message message, string roomId, ushort exceptToClientId, bool shouldRelease = true)
+        {
+            if (Rooms.TryGetValue(roomId, out List<Connection> room))
+            {
+                foreach (Connection client in room)
+                    if (client.Id != exceptToClientId)
+                        client.Send(message, false);
+
+                if (shouldRelease)
+                    message.Release();
+            }
+        }
+
+        /// <summary>Puts the given client connection into the room of the given ID. If the room doesn't exist, it will be created.</summary>
+        /// <param name="client">The client to put into the room.</param>
+        /// <param name="roomId">The ID of the room to put the client into.</param>
+        /// <returns><see langword="true"/> if the client was successfully put into the room; otherwise <see langword="false"/> (e.g. if the client was already in the room).</returns>
+        public bool JoinRoom(Connection client, string roomId)
+        {
+            if (!clientToRooms.ContainsKey(client))
+                clientToRooms.Add(client, new List<string>());
+
+            if (clientToRooms[client].Contains(roomId))
+                return false;
+            
+            if (!Rooms.ContainsKey(roomId))
+                Rooms.Add(roomId, new List<Connection>());
+            
+            clientToRooms[client].Add(roomId);
+            Rooms[roomId].Add(client);
+            
+            RoomJoined?.Invoke(this, new ServerRoomJoinedEventArgs(client, roomId));
+            
+            return true;
+        }
+        
+        /// <summary>Removes the given client connection from the room of the given ID.</summary>
+        /// <param name="client">The client to remove from the room.</param>
+        /// <param name="roomId">The ID of the room to remove the client from.</param>
+        /// <returns><see langword="true"/> if the client was successfully removed from the room; otherwise <see langword="false"/> (e.g. if the client wasn't in the room).</returns>
+        public bool LeaveRoom(Connection client, string roomId)
+        {
+            if (!clientToRooms.ContainsKey(client) || !clientToRooms[client].Contains(roomId))
+                return false;
+            
+            if (Rooms.TryGetValue(roomId, out List<Connection> room))
+            {
+                var rooms = clientToRooms[client];
+                rooms.Remove(roomId);
+                
+                if (rooms.Count == 0)
+                    clientToRooms.Remove(client);
+                
+                room.Remove(client);
+                RoomLeft?.Invoke(this, new ServerRoomLeftEventArgs(client, roomId, RoomDisconnectReason.Left));
+
+                return true;
+            }
+
+            return false;
+        }
+        
+        /// <summary>Closes the room of the given ID.</summary>
+        /// <param name="roomId">The ID of the room to close.</param>
+        public void CloseRoom(string roomId)
+        {
+            if (Rooms.TryGetValue(roomId, out List<Connection> room))
+            {
+                foreach (Connection client in room)
+                {
+                    if (clientToRooms.TryGetValue(client, out List<string> rooms))
+                    {
+                        rooms.Remove(roomId);
+                        if (rooms.Count == 0)
+                            clientToRooms.Remove(client);
+                    }
+                    
+                    RoomLeft?.Invoke(this, new ServerRoomLeftEventArgs(client, roomId, RoomDisconnectReason.Closed));
+                }
+                
+                Rooms.Remove(roomId);
+            }
+        }
 
         /// <summary>Retrieves the client with the given ID, if a client with that ID is currently connected.</summary>
         /// <param name="id">The ID of the client to retrieve.</param>
@@ -446,6 +563,21 @@ namespace Riptide
 
             if (clients.Remove(client.Id))
                 availableClientIds.Enqueue(client.Id);
+            
+            if (clientToRooms.TryGetValue(client, out List<string> rooms))
+            {
+                foreach (string roomId in rooms)
+                    if (Rooms.TryGetValue(roomId, out List<Connection> room))
+                    {
+                        room.Remove(client);
+                        RoomLeft?.Invoke(this, new ServerRoomLeftEventArgs(client, roomId, RoomDisconnectReason.Disconnected));
+                        
+                        if (room.Count == 0)
+                            Rooms.Remove(roomId);
+                    }
+
+                clientToRooms.Remove(client);
+            }
 
             if (client.IsConnected)
                 OnClientDisconnected(client, reason); // Only run if the client was ever actually connected
@@ -594,5 +726,16 @@ namespace Riptide
             ClientDisconnected?.Invoke(this, new ServerDisconnectedEventArgs(connection, reason));
         }
         #endregion
+    }
+    
+    /// <summary>The reason for a connection to get disconnected from a room.</summary>
+    public enum RoomDisconnectReason
+    {
+        /// <summary>The connection left the room.</summary>
+        Left,
+        /// <summary>The room was closed.</summary>
+        Closed,
+        /// <summary>The connection was disconnected.</summary>
+        Disconnected
     }
 }

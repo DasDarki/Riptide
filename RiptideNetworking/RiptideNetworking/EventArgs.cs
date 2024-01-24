@@ -53,6 +53,46 @@ namespace Riptide
         }
     }
 
+    /// <summary>Contains event data for when a client joins a room.</summary>
+    public class ServerRoomJoinedEventArgs : EventArgs
+    {
+        /// <summary>The client that joined the room.</summary>
+        public readonly Connection Client;
+        /// <summary>The ID of the room that the client joined.</summary>
+        public readonly string RoomId;
+        
+        /// <summary>Initializes event data.</summary>
+        /// <param name="client">The client that joined the room.</param>
+        /// <param name="roomId">The ID of the room that the client joined.</param>
+        public ServerRoomJoinedEventArgs(Connection client, string roomId)
+        {
+            Client = client;
+            RoomId = roomId;
+        }
+    }
+    
+    /// <summary>Contains event data for when a client leaves a room.</summary>
+    public class ServerRoomLeftEventArgs : EventArgs
+    {
+        /// <summary>The client that left the room.</summary>
+        public readonly Connection Client;
+        /// <summary>The ID of the room that the client left.</summary>
+        public readonly string RoomId;
+        /// <summary>The reason for the disconnection.</summary>
+        public readonly RoomDisconnectReason Reason;
+        
+        /// <summary>Initializes event data.</summary>
+        /// <param name="client">The client that left the room.</param>
+        /// <param name="roomId">The ID of the room that the client left.</param>
+        /// <param name="reason">The reason for the disconnection.</param>
+        public ServerRoomLeftEventArgs(Connection client, string roomId, RoomDisconnectReason reason)
+        {
+            Client = client;
+            RoomId = roomId;
+            Reason = reason;
+        }
+    }
+
     /// <summary>Contains event data for when a message is received.</summary>
     public class MessageReceivedEventArgs : EventArgs
     {
